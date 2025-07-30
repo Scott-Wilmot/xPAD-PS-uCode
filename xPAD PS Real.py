@@ -6,10 +6,9 @@ import sys
 #//////////
 # Variables
 #//////////
-com_pin = Pin(0, mode=Pin.IN)
-test_pin = Pin(25, mode=Pin.OUT)
-error_pin = Pin(2, mode=Pin.OUT)
-hardware_enable_pin = Pin(6, mode=Pin.OUT)
+com_pin = Pin(3, mode=Pin.IN)
+led_pin = Pin(12, mode=Pin.OUT)
+hardware_enable_pin = Pin(21, mode=Pin.OUT)
 
 flag = aio.ThreadSafeFlag()
 event_loop = aio.new_event_loop()
@@ -18,18 +17,20 @@ timer = Timer()
 
 task_list = []
 
+ping = None
+
 
 #////////////////////////////
 # Setup and Cleanup Functions 
 #////////////////////////////
-async def setup():
-    test_pin.irq(handler=first_signal, trigger=Pin.IRQ_RISING)
+
+def setup():
+    com_pin.irq(handler=first_signal, trigger=Pin.IRQ_RISING)
 
 
 def cleanup():
     # Set all OUT pins to the off state as default
-    test_pin.off()
-    error_pin.off()
+    led_pin.off()
     hardware_enable_pin.off()
     
     # Disable Timer
@@ -42,112 +43,64 @@ def cleanup():
         except BaseException as e:
             print(e)
 
-#///////////////////////
-# "Artificial" Functions
-#///////////////////////
-async def artificial_break():
-    await aio.sleep(0.5)
-    test_pin.on()
-        
-        
-async def artificial_loop():
-        while True:
-            test_pin.on()
-            await aio.sleep(1)
-            test_pin.off()
-            await aio.sleep(1)
-            
 
-#/////////////////
-# "Real" Functions
-#/////////////////
+#//////////
+# Functions
+#//////////
+
 def first_signal(_):
-    print("Init active")
     flag.set()
     hardware_enable_pin.on()
+    com_pin.irq(handler=refresh_signal, trigger=Pin.IRQ_RISING, hard=True)
+    ping = True # Defaulting true after first signal gives lenience for first cycle, false is stricter requiring another signal before the timer ends
     
 
 def refresh_signal(_):
-    if 'ping' in globals():
-        global ping
-        ping = True
-        test_pin.irq(handler=None)
-#         print("Disabling pin irq...")
-    else:
-        print("ping not in global scope")
+    print("Refresh received!")
+    com_pin.irq(handler=None)
+    global ping
+    ping = True
 
 
 async def connection_disconnect():
-    try:
-        task_list[-1].cancel()
-    except BaseException as e:
-        print(f'CANCEL ERROR: {e}')
-    except Exception:
-        print("Random ah error")
-    
-    
     while True:
-        error_pin.on()
+        led_pin.on()
         await aio.sleep(0.1)
-        error_pin.off()
+        led_pin.off()
         await aio.sleep(0.1)
-        error_pin.on()
+        led_pin.on()
         await aio.sleep(0.1)
-        error_pin.off()
+        led_pin.off()
         await aio.sleep(0.5)
 
 
 def timer_callback(_):
     global ping
     
-    try:
-        # Yes activity case
-        if ping:
-            ping = False
-            test_pin.irq(handler=refresh_signal, trigger=Pin.IRQ_RISING)
-        # No activity
-        else:
-            # Disable relevant activities
-            timer.deinit()
-            print("DEAD")
-            aio.run(connection_disconnect())
-            
-            
-    # Uninitialized Case    
-    except Exception as e:
-        print(f'ERROR: {type(e)}')
+    # Yes activity case
+    if ping:
         ping = False
-        
-        
-async def idle():
-    aio.create_task(artificial_break()) # This simulates activity, when attached to the assembly this would be removed entirely
-    await flag.wait()
-    test_pin.off()
-    
-    
-async def listening_loop():
-    test_pin.irq(handler=refresh_signal, trigger=Pin.IRQ_RISING)
-    timer.init(mode=Timer.PERIODIC, period=1500, callback=timer_callback)
-    
-    a_task = aio.create_task(artificial_loop())
-    task_list.append(a_task)
+        com_pin.irq(handler=refresh_signal, trigger=Pin.IRQ_RISING, hard=True)
+    # No activity
+    else:
+        # Disable relevant activities
+        timer.deinit()
+        com_pin.irq(handler=None)
+        aio.run(connection_disconnect())
 
 
 #////////////////
 # Main event loop
 #////////////////
 async def main():
-    await aio.create_task(setup())
-
-    task = aio.create_task(idle())
-    task_list.append(task)
-    await task
+    setup()
     
-    # Initial communication received, change COM pin timer_callback behavior
-    task = aio.create_task(listening_loop())
-    task_list.append(task)
+    await flag.wait() # Blocks execution until com_pin is first triggered
     
-    event_loop.run_forever()
+    timer.init(mode=Timer.PERIODIC, period=5000, callback=timer_callback) # Start the listening loop for any received signals
+    
+    while True:
+        await aio.sleep(5)
 
 
 #//////////////
@@ -155,6 +108,7 @@ async def main():
 #//////////////
 try:
     aio.run(main())
+    event_loop.run_forever()
 except BaseException as e:
     print(f'RUN ERROR: {e}')
 finally:
