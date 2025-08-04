@@ -6,18 +6,15 @@ import sys
 #//////////
 # Variables
 #//////////
-com_pin = Pin(3, mode=Pin.IN)
-led_pin = Pin(12, mode=Pin.OUT)
-hardware_enable_pin = Pin(21, mode=Pin.OUT)
+com_pin = Pin(3, mode=Pin.IN) # Pin attached to the RS485 input
+led_pin = Pin(12, mode=Pin.OUT) # Failure LED pin
+hardware_enable_pin = Pin(21, mode=Pin.OUT) # Pin connected to the ULN2003 for enabling the meerstetter GPIO
 
-flag = aio.ThreadSafeFlag()
+flag = aio.ThreadSafeFlag() # Acts as an execution blocking object until the flag is set (see first_signal())
 event_loop = aio.new_event_loop()
 
 timer = Timer()
-
-task_list = []
-
-ping = None
+ping = None # Acts as the state check for if any signal has been recieved in the past timer window
 
 
 #////////////////////////////
@@ -25,7 +22,7 @@ ping = None
 #////////////////////////////
 
 def setup():
-    com_pin.irq(handler=first_signal, trigger=Pin.IRQ_RISING)
+    com_pin.irq(handler=first_signal, trigger=Pin.IRQ_RISING, hard=True)
 
 
 def cleanup():
@@ -35,33 +32,42 @@ def cleanup():
     
     # Disable Timer
     timer.deinit()
-    
-    # Kill all active tasks
-    for task in task_list:
-        try:
-            task.cancel()
-        except BaseException as e:
-            print(e)
 
 
 #//////////
 # Functions
 #//////////
 
+"""
+Function handles the first recieved signal from the serial port
+    and changes com ports behavior for further signals
+"""
 def first_signal(_):
     flag.set()
     hardware_enable_pin.on()
-    com_pin.irq(handler=refresh_signal, trigger=Pin.IRQ_RISING, hard=True)
-    ping = True # Defaulting true after first signal gives lenience for first cycle, false is stricter requiring another signal before the timer ends
+    com_pin.irq(handler=refresh_handler, trigger=Pin.IRQ_RISING, hard=True)
     
+    global ping
+    ping = True # Defaulting true after first signal gives lenience for first cycle, false is stricter requiring another signal before the timer ends
+    hardware_enable_pin.on() # Questionable if this should go here or in the startup function, check with Yoram
 
-def refresh_signal(_):
-    print("Refresh received!")
+
+"""
+Handler function for when the serial port transmits data to the computer
+
+Sets the ping variable to true to represent a signal within the last time check window
+"""
+def refresh_handler(_):
     com_pin.irq(handler=None)
     global ping
     ping = True
 
 
+"""
+Simple code for infinitely blinking the light once the no signal error has been detected
+
+This code represents the end state of the program, only action to do from here is reboot the power
+"""
 async def connection_disconnect():
     while True:
         led_pin.on()
@@ -74,17 +80,23 @@ async def connection_disconnect():
         await aio.sleep(0.5)
 
 
-def timer_callback(_):
+"""
+Handler function for the activity timer
+
+Checks if a signal has been recieved from the serial port within the last time window
+"""
+def timer_handler(_):
     global ping
     
     # Yes activity case
     if ping:
         ping = False
-        com_pin.irq(handler=refresh_signal, trigger=Pin.IRQ_RISING, hard=True)
+        com_pin.irq(handler=refresh_handler, trigger=Pin.IRQ_RISING, hard=True)
     # No activity
     else:
         # Disable relevant activities
         timer.deinit()
+        hardware_enable_pin.off()
         com_pin.irq(handler=None)
         aio.run(connection_disconnect())
 
@@ -97,10 +109,11 @@ async def main():
     
     await flag.wait() # Blocks execution until com_pin is first triggered
     
-    timer.init(mode=Timer.PERIODIC, period=5000, callback=timer_callback) # Start the listening loop for any received signals
+    timer.init(mode=Timer.PERIODIC, period=5000, callback=timer_handler) # Start the listening loop for any received signals
     
+    # Sleep loop is required to prevent the method from ending so the timer can run forever (or until the signal is not recieved)
     while True:
-        await aio.sleep(5)
+        await aio.sleep(1000)
 
 
 #//////////////
@@ -109,7 +122,5 @@ async def main():
 try:
     aio.run(main())
     event_loop.run_forever()
-except BaseException as e:
-    print(f'RUN ERROR: {e}')
 finally:
     cleanup()
