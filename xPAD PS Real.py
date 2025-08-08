@@ -1,7 +1,9 @@
+"""
+Potential future changes/fixes:
+    - The while loop in the main function remains running forever even when the signal hasn't been detefcted and the led is blinking (If loop timer is set to a very large value it typically consumes little to no room)
+"""
 from machine import Pin, Timer
 import uasyncio as aio
-import sys
-
 
 #//////////
 # Variables
@@ -14,7 +16,8 @@ flag = aio.ThreadSafeFlag() # Acts as an execution blocking object until the fla
 event_loop = aio.new_event_loop()
 
 timer = Timer()
-ping = None # Acts as the state check for if any signal has been recieved in the past timer window
+timer_period_ms = 5000 # The time in milliseconds between checks for a received signal by the timer
+ping = False # Acts as the state check for if any signal has been recieved in the past timer window
 
 
 #////////////////////////////
@@ -43,6 +46,7 @@ Function handles the first recieved signal from the serial port
     and changes com ports behavior for further signals
 """
 def first_signal(_):
+    print("First signal received!")
     flag.set()
     hardware_enable_pin.on()
     com_pin.irq(handler=refresh_handler, trigger=Pin.IRQ_RISING, hard=True)
@@ -58,6 +62,7 @@ Handler function for when the serial port transmits data to the computer
 Sets the ping variable to true to represent a signal within the last time check window
 """
 def refresh_handler(_):
+    print("Refresh received")
     com_pin.irq(handler=None)
     global ping
     ping = True
@@ -69,6 +74,7 @@ Simple code for infinitely blinking the light once the no signal error has been 
 This code represents the end state of the program, only action to do from here is reboot the power
 """
 async def connection_disconnect():
+    print("Disconnect...end of program")
     while True:
         led_pin.on()
         await aio.sleep(0.1)
@@ -109,11 +115,11 @@ async def main():
     
     await flag.wait() # Blocks execution until com_pin is first triggered
     
-    timer.init(mode=Timer.PERIODIC, period=5000, callback=timer_handler) # Start the listening loop for any received signals
+    timer.init(mode=Timer.PERIODIC, period=timer_period_ms, callback=timer_handler) # Start the listening loop for any received signals
     
     # Sleep loop is required to prevent the method from ending so the timer can run forever (or until the signal is not recieved)
     while True:
-        await aio.sleep(1000)
+        await aio.sleep(1000) # Arbitrary long wait time to prevent the loop from consuming a bunch of resources
 
 
 #//////////////
